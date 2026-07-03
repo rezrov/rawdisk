@@ -8,6 +8,16 @@ reads them back the same way.
 Handy when you need to shuttle files between devices where mounting a proper
 removable filesystem is awkward or impossible.
 
+> ## ⚠️ Warning: this destroys data on the target device
+>
+> `rawdisk send` writes **raw bytes directly to the device**, overwriting
+> whatever is there — including the **partition table and any filesystem**. The
+> device will no longer be readable as a normal disk until you repartition and
+> reformat it. **Any existing files on it will be lost.**
+>
+> There is no undo. Double-check the device path (`/dev/sdb`, `/dev/rdisk3`,
+> …) before every `send` — writing to the wrong device can wipe the wrong disk.
+
 ## Requirements
 
 Just **bash**, **dd**, and **tar** — plus **gzip** only if you use `-z`, and
