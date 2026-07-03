@@ -1,0 +1,11 @@
+# OMC operational state
+.omc/
+
+# macOS
+.DS_Store
+
+# Editor cruft
+*.swp
+*~
+.idea/
+.vscode/
