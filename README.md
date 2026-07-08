@@ -10,7 +10,7 @@ removable filesystem is awkward or impossible.
 
 > ## ⚠️ Warning: this destroys data on the target device
 >
-> `rawdisk send` writes **raw bytes directly to the device**, overwriting
+> `rawdisk.sh send` writes **raw bytes directly to the device**, overwriting
 > whatever is there — including the **partition table and any filesystem**. The
 > device will no longer be readable as a normal disk until you repartition and
 > reformat it. **Any existing files on it will be lost.**
@@ -44,9 +44,9 @@ access to the device node (e.g. added to the `disk`/`operator` group).
 ## Usage
 
 ```
-rawdisk send [-z] [-c] [-y] <device> <file>...   Bundle files and write to <device>
-rawdisk recv [-c] [-y] <device> [dest-dir]       Read from <device> and extract
-rawdisk info <device>                             Show what's stored on <device>
+rawdisk.sh send [-z] [-c] [-y] <device> <file>...   Bundle files and write to <device>
+rawdisk.sh recv [-c] [-y] <device> [dest-dir]       Read from <device> and extract
+rawdisk.sh info <device>                             Show what's stored on <device>
 ```
 
 Options:
@@ -68,14 +68,14 @@ Options:
 On the sending machine:
 
 ```sh
-rawdisk send /dev/sdb notes.txt photos/
+rawdisk.sh send /dev/sdb notes.txt photos/
 ```
 
 On the receiving machine:
 
 ```sh
-rawdisk info /dev/sdb          # optional: see size, compression, checksum
-rawdisk recv /dev/sdb ./incoming
+rawdisk.sh info /dev/sdb          # optional: see size, compression, checksum
+rawdisk.sh recv /dev/sdb ./incoming
 ```
 
 You never have to track the byte count yourself — that's the point. A small
@@ -101,11 +101,11 @@ pipes it into `tar`, which stops itself at the archive's end-of-archive marker.
 ## Notes & gotchas
 
 - **File names follow tar's rules.** If you pass absolute paths
-  (`rawdisk send /dev/sdb /home/me/notes.txt`), tar stores the full path and
+  (`rawdisk.sh send /dev/sdb /home/me/notes.txt`), tar stores the full path and
   extraction recreates that tree. To get clean names, `cd` to the parent and
   pass relative paths:
   ```sh
-  cd ~ && rawdisk send /dev/sdb notes.txt photos/
+  cd ~ && rawdisk.sh send /dev/sdb notes.txt photos/
   ```
 - **`send` overwrites the start of the device.** It requires the target to
   already exist (a real block device always does) and asks for a typed `yes`
