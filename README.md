@@ -25,6 +25,21 @@ Just **bash**, **dd**, and **tar** — plus **gzip** only if you use `-z`, and
 widely-portable options of each, so it should run on slim systems (busybox,
 macOS/BSD, older GNU userlands).
 
+### Which `dd`/`tar` it uses
+
+The script pins `dd` and `tar` to the base-system copies in `/usr/bin` or
+`/bin`, rather than whatever is first on `PATH`. This avoids a real gotcha on
+macOS: a Homebrew GNU/uutils `coreutils` install puts its own `dd` ahead of the
+system one, and some of those can't seek on macOS device nodes (you'll see
+`dd: cannot seek: Invalid argument` and the transfer aborts). Pinning to the
+system tools sidesteps that on any machine.
+
+To force a specific binary, set `RAWDISK_DD` and/or `RAWDISK_TAR`:
+
+```sh
+RAWDISK_DD=/opt/homebrew/bin/gdd rawdisk.sh send /dev/sdb file
+```
+
 ## Permissions
 
 Reading and writing a real block device is privileged, so **you'll usually need
@@ -46,6 +61,7 @@ access to the device node (e.g. added to the `disk`/`operator` group).
 ```
 rawdisk.sh send [-z] [-c] [-y] <device> <file>...   Bundle files and write to <device>
 rawdisk.sh recv [-c] [-y] <device> [dest-dir]       Read from <device> and extract
+rawdisk.sh list <device>                             List archived files without extracting
 rawdisk.sh info <device>                             Show what's stored on <device>
 ```
 
@@ -75,6 +91,7 @@ On the receiving machine:
 
 ```sh
 rawdisk.sh info /dev/sdb          # optional: see size, compression, checksum
+rawdisk.sh list /dev/sdb          # optional: peek at the file names
 rawdisk.sh recv /dev/sdb ./incoming
 ```
 

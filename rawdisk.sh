@@ -35,6 +35,24 @@ die() { printf '%s: %s\n' "$PROG" "$*" >&2; exit 1; }
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# Resolve a core tool, preferring the base-system copy in /usr/bin or /bin over
+# anything that shadows it on PATH. This matters because a Homebrew/GNU/uutils
+# coreutils install can put a different 'dd' first on PATH, and some of those
+# (e.g. uutils dd) can't seek on macOS device nodes. An explicit RAWDISK_DD /
+# RAWDISK_TAR override always wins; otherwise fall back to PATH if the tool
+# lives somewhere unusual.
+resolve_tool() {
+    local override=$1 name=$2 p
+    if [ -n "$override" ]; then printf '%s\n' "$override"; return 0; fi
+    for p in "/usr/bin/$name" "/bin/$name"; do
+        [ -x "$p" ] && { printf '%s\n' "$p"; return 0; }
+    done
+    command -v "$name" 2>/dev/null || printf '%s\n' "$name"
+}
+
+DD=$(resolve_tool "${RAWDISK_DD:-}" dd)
+TAR=$(resolve_tool "${RAWDISK_TAR:-}" tar)
+
 usage() {
     cat <<EOF
 rawdisk — sneakernet files via a raw device, no filesystem needed.
@@ -42,6 +60,7 @@ rawdisk — sneakernet files via a raw device, no filesystem needed.
 Usage:
   $PROG send [-z] [-c] [-y] <device> <file>...   Bundle files and write to <device>
   $PROG recv [-c] [-y] <device> [dest-dir]       Read from <device> and extract here
+  $PROG list <device>                             List archived files without extracting
   $PROG info <device>                             Show what's stored on <device>
 
 Options:
@@ -75,7 +94,7 @@ confirm() {
 # caller's locals, thanks to bash dynamic scope). sum is empty if none stored.
 read_header() {
     local dev=$1 hdr
-    hdr=$(dd if="$dev" bs=$HDR_BS count=1 2>/dev/null | tr -d '\0')
+    hdr=$("$DD" if="$dev" bs=$HDR_BS count=1 2>/dev/null | tr -d '\0')
     # Only the first line is our header; anything after the newline is ignored.
     read -r magic psize comp sum <<<"$hdr"
 }
@@ -105,7 +124,7 @@ cmd_send() {
     # conv=notrunc protects existing data when <device> is a regular file.
     local summary bytes
     set -o pipefail
-    summary=$( { tar c${zflag}f - "$@" | dd of="$dev" bs=$BS seek=$PAYLOAD_SEEK conv=notrunc; } 2>&1 ) \
+    summary=$( { "$TAR" c${zflag}f - "$@" | "$DD" of="$dev" bs=$BS seek=$PAYLOAD_SEEK conv=notrunc; } 2>&1 ) \
         || die "write failed:
 $summary"
     set +o pipefail
@@ -120,7 +139,7 @@ $summary"
     local sum=
     if [ "$CHECKSUM" = 1 ]; then
         local blocks=$(( (bytes + BS - 1) / BS ))
-        sum=$(dd if="$dev" bs=$BS skip=$PAYLOAD_SEEK count="$blocks" 2>/dev/null \
+        sum=$("$DD" if="$dev" bs=$BS skip=$PAYLOAD_SEEK count="$blocks" 2>/dev/null \
                 | head -c "$bytes" | sha256sum | awk '{ print $1 }')
         case ${sum:-} in
             ''|*[!0-9a-f]*) die "failed to compute checksum";;
@@ -137,7 +156,7 @@ $summary"
         hdr_line="$MAGIC $bytes $comp"
     fi
     printf '%s\n' "$hdr_line" \
-        | dd of="$dev" bs=$HDR_BS count=1 conv=notrunc 2>/dev/null \
+        | "$DD" of="$dev" bs=$HDR_BS count=1 conv=notrunc 2>/dev/null \
         || die "failed to write header"
 
     printf '%s: wrote %s bytes (%s) to %s\n' "$PROG" "$bytes" "$comp" "$dev" >&2
@@ -175,7 +194,7 @@ cmd_recv() {
     if [ -n "${sum:-}" ]; then
         if have sha256sum; then
             local actual
-            actual=$(dd if="$dev" bs=$BS skip=$PAYLOAD_SEEK count="$blocks" 2>/dev/null \
+            actual=$("$DD" if="$dev" bs=$BS skip=$PAYLOAD_SEEK count="$blocks" 2>/dev/null \
                         | head -c "$psize" | sha256sum | awk '{ print $1 }')
             if [ "$actual" != "$sum" ]; then
                 die "checksum MISMATCH — device data is corrupt, not extracting
@@ -192,8 +211,8 @@ cmd_recv() {
         "$PROG" "$psize" "${comp:-none}" "$dev" "$dest" >&2
     confirm "This will extract files into $dest (existing files may be overwritten)."
 
-    dd if="$dev" bs=$BS skip=$PAYLOAD_SEEK count="$blocks" 2>/dev/null \
-        | ( cd "$dest" && tar x${zflag}f - )
+    "$DD" if="$dev" bs=$BS skip=$PAYLOAD_SEEK count="$blocks" 2>/dev/null \
+        | ( cd "$dest" && "$TAR" x${zflag}f - )
     # dd may exit 141 (SIGPIPE) when tar finishes early — that's expected. Only
     # tar's status tells us whether extraction actually succeeded.
     local tar_status=${PIPESTATUS[1]}
@@ -223,6 +242,30 @@ cmd_info() {
     fi
 }
 
+cmd_list() {
+    [ $# -ge 1 ] || { usage; exit 1; }
+    local dev=$1
+    [ -e "$dev" ] || die "device not found: $dev"
+
+    local magic psize comp sum
+    read_header "$dev"
+    [ "$magic" = "$MAGIC" ] || die "no rawdisk archive found on $dev (bad magic)"
+    case ${psize:-} in
+        ''|*[!0-9]*) die "corrupt header (bad size: '${psize:-}')";;
+    esac
+
+    local zflag=
+    [ "$comp" = gzip ] && zflag=z
+    local blocks=$(( (psize + BS - 1) / BS ))
+
+    # List the archive contents without extracting. tar stops at its own end
+    # marker, so trailing bytes in the final block are ignored.
+    "$DD" if="$dev" bs=$BS skip=$PAYLOAD_SEEK count="$blocks" 2>/dev/null \
+        | "$TAR" t${zflag}f -
+    local tar_status=${PIPESTATUS[1]}
+    [ "$tar_status" = 0 ] || die "listing failed (tar exit $tar_status)"
+}
+
 main() {
     local sub=${1:-}
     case $sub in
@@ -246,6 +289,7 @@ main() {
     case $sub in
         send) cmd_send "$@";;
         recv) cmd_recv "$@";;
+        list) cmd_list "$@";;
         info) cmd_info "$@";;
         *) die "unknown command: $sub (see '$PROG -h')";;
     esac
