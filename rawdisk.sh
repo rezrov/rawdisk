@@ -35,6 +35,21 @@ die() { printf '%s: %s\n' "$PROG" "$*" >&2; exit 1; }
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# Is any sha256 tool available? Stock macOS has no sha256sum (only shasum /
+# openssl), while Linux has sha256sum — all produce the same digest.
+have_sha256() { have sha256sum || have shasum || have openssl; }
+
+# Read stdin, print just the 64-hex-char sha256 digest, using whatever tool is
+# present. sha256sum, 'shasum -a 256' and 'openssl dgst -sha256' all agree, so a
+# blob hashed on one platform verifies on the other.
+sha256_stdin() {
+    if   have sha256sum; then sha256sum       | awk '{ print $1;  exit }'
+    elif have shasum;    then shasum -a 256   | awk '{ print $1;  exit }'
+    elif have openssl;   then openssl dgst -sha256 | awk '{ print $NF; exit }'
+    else return 1
+    fi
+}
+
 # Resolve a core tool, preferring the base-system copy in /usr/bin or /bin over
 # anything that shadows it on PATH. This matters because a Homebrew/GNU/uutils
 # coreutils install can put a different 'dd' first on PATH, and some of those
@@ -52,6 +67,17 @@ resolve_tool() {
 
 DD=$(resolve_tool "${RAWDISK_DD:-}" dd)
 TAR=$(resolve_tool "${RAWDISK_TAR:-}" tar)
+
+# Keep archives clean across platforms. macOS bsdtar otherwise embeds Apple
+# metadata that litters a Linux extraction with junk '._*' files and xattr
+# warnings. COPYFILE_DISABLE stops the '._*' AppleDouble members (portable env
+# var, ignored elsewhere); --no-xattrs drops the xattr headers but is only
+# understood by bsdtar/GNU tar, so add it only when the tar is bsdtar.
+export COPYFILE_DISABLE=1
+TAR_COPTS=
+case $("$TAR" --version 2>/dev/null) in
+    *bsdtar*|*libarchive*) TAR_COPTS='--no-xattrs' ;;
+esac
 
 usage() {
     cat <<EOF
@@ -111,9 +137,10 @@ cmd_send() {
     local comp=none zflag=
     if [ "$COMPRESS" = 1 ]; then comp=gzip; zflag=z; fi
 
-    # Fail fast before touching the device if -c was asked for without sha256sum.
-    if [ "$CHECKSUM" = 1 ] && ! have sha256sum; then
-        die "sha256sum not found; -c requires it (omit -c to send without a checksum)"
+    # Fail fast before touching the device if -c was asked for but no sha256 tool
+    # (sha256sum / shasum / openssl) is available.
+    if [ "$CHECKSUM" = 1 ] && ! have_sha256; then
+        die "no sha256 tool found (need sha256sum, shasum, or openssl); -c requires one (omit -c to send without a checksum)"
     fi
 
     printf 'Target : %s\n' "$dev" >&2
@@ -124,7 +151,7 @@ cmd_send() {
     # conv=notrunc protects existing data when <device> is a regular file.
     local summary bytes
     set -o pipefail
-    summary=$( { "$TAR" c${zflag}f - "$@" | "$DD" of="$dev" bs=$BS seek=$PAYLOAD_SEEK conv=notrunc; } 2>&1 ) \
+    summary=$( { "$TAR" $TAR_COPTS -c ${zflag:+-z} -f - "$@" | "$DD" of="$dev" bs=$BS seek=$PAYLOAD_SEEK conv=notrunc; } 2>&1 ) \
         || die "write failed:
 $summary"
     set +o pipefail
@@ -140,7 +167,7 @@ $summary"
     if [ "$CHECKSUM" = 1 ]; then
         local blocks=$(( (bytes + BS - 1) / BS ))
         sum=$("$DD" if="$dev" bs=$BS skip=$PAYLOAD_SEEK count="$blocks" 2>/dev/null \
-                | head -c "$bytes" | sha256sum | awk '{ print $1 }')
+                | head -c "$bytes" | sha256_stdin)
         case ${sum:-} in
             ''|*[!0-9a-f]*) die "failed to compute checksum";;
         esac
@@ -158,6 +185,10 @@ $summary"
     printf '%s\n' "$hdr_line" \
         | "$DD" of="$dev" bs=$HDR_BS count=1 conv=notrunc 2>/dev/null \
         || die "failed to write header"
+
+    # Flush OS buffers so the data is really on the medium before the stick is
+    # pulled (matters especially on Linux, where block writes are cached).
+    sync 2>/dev/null || true
 
     printf '%s: wrote %s bytes (%s) to %s\n' "$PROG" "$bytes" "$comp" "$dev" >&2
     [ -n "$sum" ] && printf '%s: checksum sha256:%s\n' "$PROG" "$sum" >&2
@@ -192,10 +223,10 @@ cmd_recv() {
 
     # If a checksum was stored, verify the payload before extracting anything.
     if [ -n "${sum:-}" ]; then
-        if have sha256sum; then
+        if have_sha256; then
             local actual
             actual=$("$DD" if="$dev" bs=$BS skip=$PAYLOAD_SEEK count="$blocks" 2>/dev/null \
-                        | head -c "$psize" | sha256sum | awk '{ print $1 }')
+                        | head -c "$psize" | sha256_stdin)
             if [ "$actual" != "$sum" ]; then
                 die "checksum MISMATCH — device data is corrupt, not extracting
   expected sha256:$sum
@@ -203,7 +234,7 @@ cmd_recv() {
             fi
             printf '%s: checksum OK (sha256)\n' "$PROG" >&2
         else
-            printf '%s: warning: archive has a checksum but sha256sum is not installed; skipping verification\n' "$PROG" >&2
+            printf '%s: warning: archive has a checksum but no sha256 tool (sha256sum/shasum/openssl) is installed; skipping verification\n' "$PROG" >&2
         fi
     fi
 

@@ -20,10 +20,29 @@ removable filesystem is awkward or impossible.
 
 ## Requirements
 
-Just **bash**, **dd**, and **tar** — plus **gzip** only if you use `-z`, and
-**sha256sum** only if you use `-c` (on either side). It deliberately uses only
-widely-portable options of each, so it should run on slim systems (busybox,
-macOS/BSD, older GNU userlands).
+Just **bash**, **dd**, and **tar** — plus **gzip** only if you use `-z`, and a
+sha256 tool only if you use `-c` (**`sha256sum`**, **`shasum`**, or
+**`openssl`** — whichever is present; stock macOS has `shasum`/`openssl`, Linux
+has `sha256sum`). It deliberately uses only widely-portable options of each, so
+it should run on slim systems (busybox, macOS/BSD, older GNU userlands).
+
+### Cross-platform (macOS ↔ Linux)
+
+The on-device format is just bytes — a header and a tar payload — so a stick
+written on one OS reads on the other. The script smooths over the tool
+differences for you:
+
+- **macOS metadata is stripped on write** so a Mac-created archive doesn't
+  litter a Linux extraction with `._*` files or extended-attribute warnings
+  (`COPYFILE_DISABLE=1`, plus `--no-xattrs` when the tar is bsdtar).
+- **Checksums are tool-agnostic.** `-c` uses `sha256sum`, `shasum -a 256`, or
+  `openssl` — all produce the same digest, so a blob hashed on Linux verifies on
+  macOS and vice-versa.
+- **Buffers are flushed** with `sync` after a write, so the data is really on the
+  medium before you pull the stick (particularly relevant on Linux).
+
+For a mixed transfer, still `send` on one machine and `recv` on the other as
+normal — no flags needed for the cross-platform handling; it's automatic.
 
 ### Which `dd`/`tar` it uses
 
