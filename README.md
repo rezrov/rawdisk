@@ -115,13 +115,13 @@ rawdisk.sh recv /dev/sdb ./incoming
 ```
 
 You never have to track the byte count yourself — that's the point. A small
-512-byte header written to the front of the device records the payload size and
+header block written to the front of the device records the payload size and
 whether it was compressed, so `recv` knows exactly what to read.
 
 ## How it works
 
 ```
-offset 0      512-byte header:  "RAWDISK1 <payload_bytes> <none|gzip> [sha256hex]\n"
+offset 0      4 KiB header block:  "RAWDISK1 <payload_bytes> <none|gzip> [sha256hex]\n"
 offset 1 MiB  the tar (or tar.gz) payload
 ```
 
@@ -133,6 +133,13 @@ the write actually landed where expected.
 `send` writes the payload first (capturing the exact byte count from `dd`), then
 stamps the header. `recv` reads the header, reads back the payload region, and
 pipes it into `tar`, which stops itself at the archive's end-of-archive marker.
+
+All device I/O is aligned to 4 KiB, and the header is written as one full padded
+block. Raw character devices — macOS `/dev/rdiskN` — reject reads and writes that
+aren't a whole number of device blocks, so unaligned access fails outright with
+`Invalid argument` rather than degrading. 4 KiB is a multiple of 512, so the same
+alignment works on both 512-byte and 4Kn media. Linux block devices (`/dev/sdX`)
+are buffered and don't care either way.
 
 ## Notes & gotchas
 

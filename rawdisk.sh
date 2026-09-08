@@ -3,16 +3,16 @@
 # rawdisk — move files between machines via a raw storage device, no filesystem.
 #
 # Bundles files with tar and writes the archive straight to a block device with
-# dd, then reads them back the same way. A tiny 512-byte header at the very
-# start of the device records the payload size and whether it was gzipped, so
-# the receiving side needs no manual byte-counting.
+# dd, then reads them back the same way. A tiny header block at the very start
+# of the device records the payload size and whether it was gzipped, so the
+# receiving side needs no manual byte-counting.
 #
 # Requirements: bash, dd, tar (plus gzip only if you use -z).
 # Deliberately sticks to widely-portable options of each so it runs on slim
 # systems (busybox, macOS/BSD, old GNU, etc.).
 #
 # Layout on the device:
-#   offset 0        : 512-byte header  "RAWDISK1 <payload_bytes> <none|gzip>\n"
+#   offset 0        : 4 KiB header block "RAWDISK1 <payload_bytes> <none|gzip>\n"
 #   offset 1 MiB    : the tar (or tar.gz) payload
 # The 1 MiB gap keeps the payload aligned to a big block size for fast dd, and
 # leaves the header comfortably in its own region.
@@ -23,9 +23,15 @@ export LC_ALL=C            # stabilise dd's summary output for parsing
 PROG=${0##*/}
 
 MAGIC=RAWDISK1
-HDR_BS=512                 # header block size (bytes)
+BLK=4096                   # I/O alignment unit. Raw character devices (macOS
+                           # /dev/rdiskN) reject reads and writes that are not a
+                           # whole number of device blocks. 4096 is a multiple of
+                           # 512, so aligning to it satisfies both 512-byte and
+                           # 4Kn media without interrogating the device.
+HDR_BS=$BLK                # header block size (bytes)
 BS=1048576                 # transfer block size (bytes); also payload offset
 PAYLOAD_SEEK=1             # payload starts at PAYLOAD_SEEK * BS
+TAR_BLK=$((BLK / 512))     # tar -b factor; keeps the archive a multiple of BLK
 
 COMPRESS=0
 CHECKSUM=0
@@ -73,10 +79,16 @@ TAR=$(resolve_tool "${RAWDISK_TAR:-}" tar)
 # warnings. COPYFILE_DISABLE stops the '._*' AppleDouble members (portable env
 # var, ignored elsewhere); --no-xattrs drops the xattr headers but is only
 # understood by bsdtar/GNU tar, so add it only when the tar is bsdtar.
+#
+# -b sets the archive record size, which is what makes the payload length a
+# multiple of BLK -- required for the final write to a raw character device.
+# Both bsdtar and GNU tar accept it; an unrecognised tar (busybox) keeps its
+# default, which is fine everywhere except a 4Kn raw device.
 export COPYFILE_DISABLE=1
 TAR_COPTS=
 case $("$TAR" --version 2>/dev/null) in
-    *bsdtar*|*libarchive*) TAR_COPTS='--no-xattrs' ;;
+    *bsdtar*|*libarchive*) TAR_COPTS="--no-xattrs -b $TAR_BLK" ;;
+    *"GNU tar"*)           TAR_COPTS="-b $TAR_BLK" ;;
 esac
 
 usage() {
@@ -116,7 +128,7 @@ confirm() {
     [ "$reply" = yes ] || die "aborted"
 }
 
-# Read and parse the 512-byte header. Sets: magic, psize, comp, sum (via the
+# Read and parse the header block. Sets: magic, psize, comp, sum (via the
 # caller's locals, thanks to bash dynamic scope). sum is empty if none stored.
 read_header() {
     local dev=$1 hdr
@@ -182,9 +194,18 @@ $summary"
     else
         hdr_line="$MAGIC $bytes $comp"
     fi
+    # A raw character device only accepts writes that are a whole number of
+    # device blocks, so the header must go out as one full HDR_BS block rather
+    # than a short printf (which fails with EINVAL). Build the padded block in a
+    # temp file -- conv=sync NUL-pads the tail -- then write that block in one go.
+    local hdr_tmp
+    hdr_tmp=$(mktemp) || die "failed to create temp file for header"
     printf '%s\n' "$hdr_line" \
-        | "$DD" of="$dev" bs=$HDR_BS count=1 conv=notrunc 2>/dev/null \
-        || die "failed to write header"
+        | "$DD" of="$hdr_tmp" bs=$HDR_BS count=1 conv=sync 2>/dev/null \
+        || { rm -f "$hdr_tmp"; die "failed to build header"; }
+    "$DD" if="$hdr_tmp" of="$dev" bs=$HDR_BS count=1 conv=notrunc 2>/dev/null \
+        || { rm -f "$hdr_tmp"; die "failed to write header"; }
+    rm -f "$hdr_tmp"
 
     # Flush OS buffers so the data is really on the medium before the stick is
     # pulled (matters especially on Linux, where block writes are cached).
@@ -242,11 +263,15 @@ cmd_recv() {
         "$PROG" "$psize" "${comp:-none}" "$dev" "$dest" >&2
     confirm "This will extract files into $dest (existing files may be overwritten)."
 
+    # Trim to exactly psize: we read whole BS blocks, so the tail of the last
+    # block is padding. tar stops at its own end marker either way, but gzip
+    # sees the padding and warns about "trailing garbage", so cut it here.
     "$DD" if="$dev" bs=$BS skip=$PAYLOAD_SEEK count="$blocks" 2>/dev/null \
+        | head -c "$psize" \
         | ( cd "$dest" && "$TAR" x${zflag}f - )
     # dd may exit 141 (SIGPIPE) when tar finishes early — that's expected. Only
     # tar's status tells us whether extraction actually succeeded.
-    local tar_status=${PIPESTATUS[1]}
+    local tar_status=${PIPESTATUS[2]}
     [ "$tar_status" = 0 ] || die "extraction failed (tar exit $tar_status)"
 
     printf '%s: done.\n' "$PROG" >&2
@@ -289,11 +314,12 @@ cmd_list() {
     [ "$comp" = gzip ] && zflag=z
     local blocks=$(( (psize + BS - 1) / BS ))
 
-    # List the archive contents without extracting. tar stops at its own end
-    # marker, so trailing bytes in the final block are ignored.
+    # List the archive contents without extracting. Trimmed to psize for the
+    # same reason as recv.
     "$DD" if="$dev" bs=$BS skip=$PAYLOAD_SEEK count="$blocks" 2>/dev/null \
+        | head -c "$psize" \
         | "$TAR" t${zflag}f -
-    local tar_status=${PIPESTATUS[1]}
+    local tar_status=${PIPESTATUS[2]}
     [ "$tar_status" = 0 ] || die "listing failed (tar exit $tar_status)"
 }
 
