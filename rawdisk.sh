@@ -210,8 +210,8 @@ Usage:
 
 Options:
   -z   gzip the archive on send (recv auto-detects; needs gzip on both sides)
-  -c   on send: store a sha256 checksum (needs sha256sum; errors if absent) and
-       verify the write by reading it back. -e does the same.
+  -c   on send: store a sha256 checksum (needs sha256sum, shasum, or openssl;
+       errors if none) and verify the write by reading it back. -e does the same.
        on recv: require the blob to carry a checksum and verify it, failing if
        it has none. A checksum present in the blob is always verified even
        without -c; -c on recv just makes that verification mandatory.
