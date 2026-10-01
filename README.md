@@ -24,9 +24,11 @@ Just **bash**, **dd**, and **tar** — plus **gzip** only if you use `-z`, a
 sha256 tool only if you use `-c` (**`sha256sum`**, **`shasum`**, or
 **`openssl`** — whichever is present; stock macOS has `shasum`/`openssl`, Linux
 has `sha256sum`), and **`openssl`** only if you use `-e` (stock on macOS and on
-most Linux distributions; typically absent on busybox-only systems). It
-deliberately uses only widely-portable options of each, so it should run on slim
-systems (busybox, macOS/BSD, older GNU userlands).
+most Linux distributions; typically absent on busybox-only systems). `-c` and
+`-e` also use **tee** and **mkfifo** to verify the write; both are standard
+wherever `dd` is, busybox included. It deliberately uses only widely-portable
+options of each, so it should run on slim systems (busybox, macOS/BSD, older GNU
+userlands).
 
 ### Cross-platform (macOS ↔ Linux)
 
@@ -94,9 +96,9 @@ rawdisk.sh info <device>                                  Show what's stored on 
 
 Options:
 - `-z` — gzip the archive on send. `recv` auto-detects it; needs gzip on both sides.
-- `-c` — on **send**, store a sha256 checksum of the payload. Requires
-  `sha256sum`; if it's not installed, `-c` errors out rather than silently
-  sending unchecked data. The write is also verified by reading it back (see
+- `-c` — on **send**, store a sha256 checksum of the payload. Requires a
+  sha256 tool (`sha256sum`, `shasum`, or `openssl`); if none is installed, `-c`
+  errors out rather than silently sending unchecked data. The write is also verified by reading it back (see
   [Write verification](#how-it-works)). Without `-c` nothing about checksums is
   written or printed.
   On **recv**, a checksum present in the blob is *always* verified before
